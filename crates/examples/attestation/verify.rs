@@ -7,48 +7,32 @@ use std::time::Duration;
 use clap::Parser;
 
 use tls_core::verify::WebPkiVerifier;
-use tls_server_fixture::CA_CERT_DER;
 use tlsn_core::{
     presentation::{Presentation, PresentationOutput},
     signing::VerifyingKey,
     CryptoProvider,
 };
-use tlsn_examples::ExampleType;
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
 struct Args {
-    /// What data to notarize.
-    #[clap(default_value_t, value_enum)]
-    example_type: ExampleType,
+    #[clap(long)]
+    presentation_path: String,
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
 
-    verify_presentation(&args.example_type).await
+    verify_presentation(&args.presentation_path).await
 }
 
-async fn verify_presentation(example_type: &ExampleType) -> Result<(), Box<dyn std::error::Error>> {
+async fn verify_presentation(presentation_path_str: &str) -> Result<(), Box<dyn std::error::Error>> {
     // Read the presentation from disk.
-    let presentation_path = tlsn_examples::get_file_path(example_type, "presentation");
+    let presentation: Presentation = bincode::deserialize(&std::fs::read(presentation_path_str)?)?;
 
-    let presentation: Presentation = bincode::deserialize(&std::fs::read(presentation_path)?)?;
-
-    // Create a crypto provider accepting the server-fixture's self-signed
-    // root certificate.
-    //
-    // This is only required for offline testing with the server-fixture. In
-    // production, use `CryptoProvider::default()` instead.
-    let mut root_store = tls_core::anchors::RootCertStore::empty();
-    root_store
-        .add(&tls_core::key::Certificate(CA_CERT_DER.to_vec()))
-        .unwrap();
-    let crypto_provider = CryptoProvider {
-        cert: WebPkiVerifier::new(root_store, None),
-        ..Default::default()
-    };
+    // Use the default crypto provider for web PKI verification.
+    let crypto_provider = CryptoProvider::default();
 
     let VerifyingKey {
         alg,

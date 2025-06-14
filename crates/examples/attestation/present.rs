@@ -6,33 +6,36 @@ use clap::Parser;
 use hyper::header;
 
 use tlsn_core::{attestation::Attestation, presentation::Presentation, CryptoProvider, Secrets};
-use tlsn_examples::ExampleType;
 use tlsn_formats::http::HttpTranscript;
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
 struct Args {
-    /// What data to notarize
-    #[clap(default_value_t, value_enum)]
-    example_type: ExampleType,
+    #[clap(long)]
+    attestation_path: String,
+    #[clap(long)]
+    secrets_path: String,
+    #[clap(long, default_value = "presentation.tlsn")]
+    output_path: String,
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
 
-    create_presentation(&args.example_type).await
+    create_presentation(&args.attestation_path, &args.secrets_path, &args.output_path).await
 }
 
-async fn create_presentation(example_type: &ExampleType) -> Result<(), Box<dyn std::error::Error>> {
-    let attestation_path = tlsn_examples::get_file_path(example_type, "attestation");
-    let secrets_path = tlsn_examples::get_file_path(example_type, "secrets");
+async fn create_presentation(
+    attestation_path_str: &str, // Renamed to avoid conflict with variable below
+    secrets_path_str: &str, // Renamed to avoid conflict with variable below
+    output_path_str: &str, // Renamed to avoid conflict with variable below
+) -> Result<(), Box<dyn std::error::Error>> {
+    // Read attestation from disk using the provided path.
+    let attestation: Attestation = bincode::deserialize(&std::fs::read(attestation_path_str)?)?;
 
-    // Read attestation from disk.
-    let attestation: Attestation = bincode::deserialize(&std::fs::read(attestation_path)?)?;
-
-    // Read secrets from disk.
-    let secrets: Secrets = bincode::deserialize(&std::fs::read(secrets_path)?)?;
+    // Read secrets from disk using the provided path.
+    let secrets: Secrets = bincode::deserialize(&std::fs::read(secrets_path_str)?)?;
 
     // Parse the HTTP transcript.
     let transcript = HttpTranscript::parse(secrets.transcript())?;
@@ -76,14 +79,49 @@ async fn create_presentation(example_type: &ExampleType) -> Result<(), Box<dyn s
     let content = &response.body.as_ref().unwrap().content;
     match content {
         tlsn_formats::http::BodyContent::Json(json) => {
-            // For experimentation, reveal the entire response or just a selection.
-            let reveal_all = false;
-            if reveal_all {
-                builder.reveal_recv(response)?;
+            // The 'json' variable here is of type tlsn_formats::http::JsonValue (which is an alias for serde_json::Value)
+            if let Some(result_field_value) = json.get("result") { // result_field_value is &tlsn_formats::http::JsonValue
+                match result_field_value {
+                    // Use the correct path to JsonValue as suggested by the compiler
+                    tlsn_formats::json::JsonValue::Array(_) => {
+                        // Likely a getUpdates response, reveal the entire array of updates.
+                        builder.reveal_recv(result_field_value)?;
+                    }
+                    tlsn_formats::json::JsonValue::Object(_) => {
+                        // Likely a getMe, sendMessage, or similar response where result is an object.
+                        // Reveal known fields from getMe/sendMessage response structure:
+                        if let Some(id_val) = result_field_value.get("id") {
+                            builder.reveal_recv(id_val)?;
+                        }
+                        if let Some(is_bot_val) = result_field_value.get("is_bot") {
+                            builder.reveal_recv(is_bot_val)?;
+                        }
+                        if let Some(first_name_val) = result_field_value.get("first_name") {
+                            builder.reveal_recv(first_name_val)?;
+                        }
+                        if let Some(username_val) = result_field_value.get("username") {
+                            builder.reveal_recv(username_val)?;
+                        }
+                        // Add more specific field reveals for sendMessage or other object types if necessary
+                    }
+                    _ => {
+                        // The "result" field is present but is neither an Array nor an Object.
+                        // This is unusual for a typical successful Telegram API "result" field.
+                        // Fallback to revealing the 'ok' field from the root json if present.
+                        if let Some(ok_val) = json.get("ok") {
+                            builder.reveal_recv(ok_val)?;
+                        }
+                    }
+                }
             } else {
-                builder.reveal_recv(json.get("id").unwrap())?;
-                builder.reveal_recv(json.get("information.name").unwrap())?;
-                builder.reveal_recv(json.get("meta.version").unwrap())?;
+                // No "result" field found. This is common for error responses from Telegram.
+                // Reveal "ok" (usually false for errors) and "description" if available.
+                if let Some(ok_val) = json.get("ok") {
+                    builder.reveal_recv(ok_val)?;
+                }
+                if let Some(description_val) = json.get("description") {
+                    builder.reveal_recv(description_val)?;
+                }
             }
         }
         tlsn_formats::http::BodyContent::Unknown(span) => {
@@ -105,13 +143,10 @@ async fn create_presentation(example_type: &ExampleType) -> Result<(), Box<dyn s
 
     let presentation: Presentation = builder.build()?;
 
-    let presentation_path = tlsn_examples::get_file_path(example_type, "presentation");
+    // Write the presentation to disk using the output_path
+    std::fs::write(output_path_str, bincode::serialize(&presentation)?)?;
 
-    // Write the presentation to disk.
-    std::fs::write(&presentation_path, bincode::serialize(&presentation)?)?;
-
-    println!("Presentation built successfully!");
-    println!("The presentation has been written to `{presentation_path}`.");
+    println!("Presentation successfully created at: {}", output_path_str);
 
     Ok(())
 }
