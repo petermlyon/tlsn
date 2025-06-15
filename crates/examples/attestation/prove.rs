@@ -10,7 +10,6 @@ use http_body_util::Full; // Added for request body handling
 use http_body_util::Empty;
 use hyper::{body::Bytes, Request, StatusCode};
 use hyper_util::rt::TokioIo;
-use spansy::Spanned;
 use tokio_util::compat::{FuturesAsyncReadCompatExt, TokioAsyncReadCompatExt};
 use tracing::debug;
 
@@ -20,9 +19,11 @@ use tls_core::verify::WebPkiVerifier;
 use tlsn_common::config::ProtocolConfig;
 use tlsn_core::{request::RequestConfig, transcript::TranscriptCommitConfig, CryptoProvider};
 // use tlsn_examples::ExampleType; // Replaced Args structure, ExampleType not used for URI/headers
-use tlsn_formats::http::{DefaultHttpCommitter, HttpCommit, HttpTranscript};
+use tlsn_formats::http::{BodyContent, HttpTranscript};
+use hyper::header;
+use tlsn_formats::json::JsonValue;
+use tlsn_formats::spansy::Spanned;
 use tlsn_prover::{Prover, ProverConfig};
-// use tlsn_server_fixture::DEFAULT_FIXTURE_PORT; // Replaced with specific port for Telegram or default
 
 const TELEGRAM_API_DOMAIN: &str = "api.telegram.org";
 const DEFAULT_TELEGRAM_PORT: u16 = 443;
@@ -209,6 +210,12 @@ async fn notarize(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     // Parse the HTTP transcript.
     let transcript = HttpTranscript::parse(prover.transcript())?;
 
+    let response = &transcript.responses[0];
+    let body_span = response.body.as_ref().unwrap().content.span();
+    let mut builder = TranscriptCommitConfig::builder(prover.transcript());
+    builder.commit_recv(body_span)?;
+    eprintln!("[prove.rs] Committed body span: {:?}", body_span);
+
     let body_content = &transcript.responses[0].body.as_ref().unwrap().content;
     let body = String::from_utf8_lossy(body_content.span().as_bytes());
 
@@ -220,13 +227,99 @@ async fn notarize(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     // The debug logging of the parsed body is removed to keep stdout clean.
     // If you need to debug the Rust code itself, you can use `eprintln!` or `debug!` (if tracing is configured for stderr).
 
-    // Commit to the transcript.
+    // Commit to the transcript selectively.
     let mut builder = TranscriptCommitConfig::builder(prover.transcript());
 
-    // This commits to various parts of the transcript separately (e.g. request
-    // headers, response headers, response body and more). See https://docs.tlsnotary.org//protocol/commit_strategy.html
-    // for other strategies that can be used to generate commitments.
-    DefaultHttpCommitter::default().commit_transcript(&mut builder, &transcript)?;
+    // Commit request parts
+    let request = &transcript.requests[0];
+    // Commit the structure of the request without the data.
+    builder.commit_sent(&request.without_data())?;
+    // Commit the request target.
+    builder.commit_sent(&request.request.target)?;
+    // Commit request headers, redacting sensitive ones.
+    for header_span in &request.headers {
+        if !(header_span
+            .name
+            .as_str()
+            .eq_ignore_ascii_case(header::USER_AGENT.as_str())
+            || header_span
+                .name
+                .as_str()
+                .eq_ignore_ascii_case(header::AUTHORIZATION.as_str()))
+        {
+            builder.commit_sent(header_span)?;
+        } else {
+            builder.commit_sent(&header_span.without_value())?;
+        }
+    }
+    // Assuming no sensitive request body to commit for Telegram GET requests.
+
+    // Commit response parts
+    let response = &transcript.responses[0];
+    // Commit the structure of the response without the data.
+    builder.commit_recv(&response.without_data())?;
+    // Commit all response headers.
+    for header_span in &response.headers {
+        builder.commit_recv(header_span)?;
+    }
+
+    // Commit specific fields from the JSON response body
+    if let Some(resp_body_container) = response.body.as_ref() {
+        match &resp_body_container.content {
+            tlsn_formats::http::BodyContent::Json(json_value) => {
+                eprintln!("[prove.rs] Processing JSON response body for selective field commitment.");
+                let allowed_fields = ["forward_from", "forward_origin", "forward_date", "text"];
+                match json_value {
+                    tlsn_formats::json::JsonValue::Object(root_obj) => {
+                        if let Some(result_val) = root_obj.get("result") {
+                            if let tlsn_formats::json::JsonValue::Array(results_array) = result_val {
+                                for update_container_val in results_array.elems.iter() {
+                                    if let tlsn_formats::json::JsonValue::Object(update_container_obj) = update_container_val {
+                                        if let Some(message_val) = update_container_obj.get("message") {
+                                            if let tlsn_formats::json::JsonValue::Object(message_obj) = message_val {
+                                                for &field_name in allowed_fields.iter() {
+                                                    if let Some(field_data_val) = message_obj.get(field_name) {
+                                                        let field_span = field_data_val.span();
+                                                        eprintln!("[prove.rs] Committing field '{}' with span: {:?}", field_name, field_span.indices());
+                                                        builder.commit_recv(field_span)?;
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    tlsn_formats::json::JsonValue::Array(root_array) => {
+                        for update_container_val in root_array.elems.iter() {
+                            if let tlsn_formats::json::JsonValue::Object(update_container_obj) = update_container_val {
+                                if let Some(message_val) = update_container_obj.get("message") {
+                                    if let tlsn_formats::json::JsonValue::Object(message_obj) = message_val {
+                                        for &field_name in allowed_fields.iter() {
+                                            if let Some(field_data_val) = message_obj.get(field_name) {
+                                                let field_span = field_data_val.span();
+                                                eprintln!("[prove.rs] Committing field '{}' (from root array) with span: {:?}", field_name, field_span.indices());
+                                                builder.commit_recv(field_span)?;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    _ => {
+                        eprintln!("[prove.rs] JSON response body is not an Object or Array at the root. No specific fields committed.");
+                    }
+                }
+            }
+            _ => {
+                eprintln!("[prove.rs] Response body is not JSON. No specific fields committed.");
+            }
+        }
+    } else {
+        eprintln!("[prove.rs] No response body found. No specific fields committed.");
+    }
 
     let transcript_commit = builder.build()?;
 

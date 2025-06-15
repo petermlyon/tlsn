@@ -7,6 +7,7 @@ use hyper::header;
 
 use tlsn_core::{attestation::Attestation, presentation::Presentation, CryptoProvider, Secrets};
 use tlsn_formats::http::HttpTranscript;
+use tlsn_formats::spansy::Spanned;
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -75,26 +76,32 @@ async fn create_presentation(
     for header in &response.headers {
         builder.reveal_recv(header)?;
     }
-
     let content = &response.body.as_ref().unwrap().content;
+    let body_span = response.body.as_ref().unwrap().content.span();
+    eprintln!("[present.rs] Transcript body span: {:?}", body_span.indices());
     match content {
         tlsn_formats::http::BodyContent::Json(json) => {
-            // The 'json' variable here is of type tlsn_formats::http::JsonValue (which is an alias for serde_json::Value)
-            if let Some(result_field_value) = json.get("result") {
-                builder.reveal_recv(result_field_value)?;
-            } else {
-                // No "result" field found. This is common for error responses from Telegram.
-                // Reveal "ok" (usually false for errors) and "description" if available.
-                if let Some(ok_val) = json.get("ok") {
-                    builder.reveal_recv(ok_val)?;
+            match json {
+                tlsn_formats::json::JsonValue::Object(obj) => {
+                    // Look for the "result" array
+                    if let Some(result_field_value) = obj.get("result") {
+                        if let tlsn_formats::json::JsonValue::Array(results) = result_field_value {
+                            for msg in results.elems.iter() {
+                                if let Some(message) = msg.get("message") {
+                                    for field in ["forward_from", "forward_origin", "forward_date", "text"] {
+                                        if let Some(field_value) = message.get(field) {
+                                            let span = field_value.span();
+                                            eprintln!("[present.rs] Attempting to reveal span: {:?}", span.indices());
+                                            builder.reveal_recv(field_value)?;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
-                if let Some(description_val) = json.get("description") {
-                    builder.reveal_recv(description_val)?;
-                }
+                _ => {}
             }
-        }
-        tlsn_formats::http::BodyContent::Unknown(span) => {
-            builder.reveal_recv(span)?;
         }
         _ => {}
     }
