@@ -80,39 +80,8 @@ async fn create_presentation(
     match content {
         tlsn_formats::http::BodyContent::Json(json) => {
             // The 'json' variable here is of type tlsn_formats::http::JsonValue (which is an alias for serde_json::Value)
-            if let Some(result_field_value) = json.get("result") { // result_field_value is &tlsn_formats::http::JsonValue
-                match result_field_value {
-                    // Use the correct path to JsonValue as suggested by the compiler
-                    tlsn_formats::json::JsonValue::Array(_) => {
-                        // Likely a getUpdates response, reveal the entire array of updates.
-                        builder.reveal_recv(result_field_value)?;
-                    }
-                    tlsn_formats::json::JsonValue::Object(_) => {
-                        // Likely a getMe, sendMessage, or similar response where result is an object.
-                        // Reveal known fields from getMe/sendMessage response structure:
-                        if let Some(id_val) = result_field_value.get("id") {
-                            builder.reveal_recv(id_val)?;
-                        }
-                        if let Some(is_bot_val) = result_field_value.get("is_bot") {
-                            builder.reveal_recv(is_bot_val)?;
-                        }
-                        if let Some(first_name_val) = result_field_value.get("first_name") {
-                            builder.reveal_recv(first_name_val)?;
-                        }
-                        if let Some(username_val) = result_field_value.get("username") {
-                            builder.reveal_recv(username_val)?;
-                        }
-                        // Add more specific field reveals for sendMessage or other object types if necessary
-                    }
-                    _ => {
-                        // The "result" field is present but is neither an Array nor an Object.
-                        // This is unusual for a typical successful Telegram API "result" field.
-                        // Fallback to revealing the 'ok' field from the root json if present.
-                        if let Some(ok_val) = json.get("ok") {
-                            builder.reveal_recv(ok_val)?;
-                        }
-                    }
-                }
+            if let Some(result_field_value) = json.get("result") {
+                builder.reveal_recv(result_field_value)?;
             } else {
                 // No "result" field found. This is common for error responses from Telegram.
                 // Reveal "ok" (usually false for errors) and "description" if available.
