@@ -6,7 +6,6 @@ use std::time::Duration;
 
 use clap::Parser;
 
-use tls_core::verify::WebPkiVerifier;
 use tlsn_core::{
     presentation::{Presentation, PresentationOutput},
     signing::VerifyingKey,

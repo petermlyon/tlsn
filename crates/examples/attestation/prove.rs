@@ -7,21 +7,17 @@ use std::env;
 use clap::Parser;
 use hyper::Method; // Added for dynamic HTTP methods
 use http_body_util::Full; // Added for request body handling
-use http_body_util::Empty;
 use hyper::{body::Bytes, Request, StatusCode};
 use hyper_util::rt::TokioIo;
 use tokio_util::compat::{FuturesAsyncReadCompatExt, TokioAsyncReadCompatExt};
-use tracing::debug;
 
 use notary_client::{Accepted, NotarizationRequest, NotaryClient};
-use tls_core::verify::WebPkiVerifier;
 // use tls_server_fixture::{CA_CERT_DER, SERVER_DOMAIN}; // Original server fixture, not used for Telegram
 use tlsn_common::config::ProtocolConfig;
 use tlsn_core::{request::RequestConfig, transcript::TranscriptCommitConfig, CryptoProvider};
 // use tlsn_examples::ExampleType; // Replaced Args structure, ExampleType not used for URI/headers
-use tlsn_formats::http::{BodyContent, HttpTranscript};
+use tlsn_formats::http::HttpTranscript;
 use hyper::header;
-use tlsn_formats::json::JsonValue;
 use tlsn_formats::spansy::Spanned;
 use tlsn_prover::{Prover, ProverConfig};
 
