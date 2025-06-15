@@ -44,29 +44,29 @@ async fn create_presentation(
     // Build a transcript proof.
     let mut builder = secrets.transcript_proof_builder();
 
-    // Here is where we reveal all or some of the parts we committed in `prove.rs`
-    // previously.
+    // Reveal specific request parts committed by the prover.
     let request = &transcript.requests[0];
-    // Reveal the structure of the request without the headers or body.
-    builder.reveal_sent(&request.without_data())?;
-    // Reveal the request target.
-    builder.reveal_sent(&request.request.target)?;
-    // Reveal all request headers except the values of User-Agent and Authorization.
-    for header in &request.headers {
-        if !(header
-            .name
-            .as_str()
-            .eq_ignore_ascii_case(header::USER_AGENT.as_str())
-            || header
-                .name
-                .as_str()
-                .eq_ignore_ascii_case(header::AUTHORIZATION.as_str()))
-        {
-            builder.reveal_sent(header)?;
-        } else {
-            builder.reveal_sent(&header.without_value())?;
+
+    // Reveal the HTTP method
+    builder.reveal_sent(request.request.method.span())?;
+    eprintln!("[present.rs] Revealed request method span: {:?}", request.request.method.span().indices());
+
+    // HTTP version is not revealed as a separate spanned item.
+
+    // Reveal only the "Host" request header
+    let mut host_header_revealed = false;
+    for header_span in &request.headers {
+        if header_span.name.as_str().eq_ignore_ascii_case(hyper::header::HOST.as_str()) {
+            builder.reveal_sent(header_span.span())?;
+            eprintln!("[present.rs] Revealed Host header span: {:?}", header_span.span().indices());
+            host_header_revealed = true;
+            break; // Assuming only one Host header
         }
     }
+    if !host_header_revealed {
+        eprintln!("[present.rs] WARNING: Host header not found in transcript or not revealed.");
+    }
+    // The request target (path with API key) is intentionally NOT revealed.
 
     // Reveal only parts of the response.
     let response = &transcript.responses[0];
@@ -88,7 +88,7 @@ async fn create_presentation(
                         if let tlsn_formats::json::JsonValue::Array(results) = result_field_value {
                             for msg in results.elems.iter() {
                                 if let Some(message) = msg.get("message") {
-                                    for field in ["forward_from", "forward_origin", "forward_date", "text"] {
+                                    for field in ["forward_from", "forward_sender_name", "forward_origin", "forward_date", "text"] {
                                         if let Some(field_value) = message.get(field) {
                                             let span = field_value.span();
                                             eprintln!("[present.rs] Attempting to reveal span: {:?}", span.indices());

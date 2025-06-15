@@ -226,28 +226,30 @@ async fn notarize(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     // Commit to the transcript selectively.
     let mut builder = TranscriptCommitConfig::builder(prover.transcript());
 
-    // Commit request parts
+    // Commit specific request parts to prove connection to the correct host without revealing the API key.
     let request = &transcript.requests[0];
-    // Commit the structure of the request without the data.
-    builder.commit_sent(&request.without_data())?;
-    // Commit the request target.
-    builder.commit_sent(&request.request.target)?;
-    // Commit request headers, redacting sensitive ones.
+
+    // Commit the HTTP method (e.g., "GET")
+    builder.commit_sent(request.request.method.span())?;
+    eprintln!("[prove.rs] Committed request method span: {:?}", request.request.method.span().indices());
+
+    // HTTP version is not committed as a separate spanned item as it's not directly available as such.
+    // It is implicitly part of the overall request line and TLS exchange.
+
+    // Commit only the "Host" request header
+    let mut host_header_committed = false;
     for header_span in &request.headers {
-        if !(header_span
-            .name
-            .as_str()
-            .eq_ignore_ascii_case(header::USER_AGENT.as_str())
-            || header_span
-                .name
-                .as_str()
-                .eq_ignore_ascii_case(header::AUTHORIZATION.as_str()))
-        {
-            builder.commit_sent(header_span)?;
-        } else {
-            builder.commit_sent(&header_span.without_value())?;
+        if header_span.name.as_str().eq_ignore_ascii_case(hyper::header::HOST.as_str()) {
+            builder.commit_sent(header_span.span())?;
+            eprintln!("[prove.rs] Committed Host header span: {:?}", header_span.span().indices());
+            host_header_committed = true;
+            break; // Assuming only one Host header
         }
     }
+    if !host_header_committed {
+        eprintln!("[prove.rs] WARNING: Host header not found or not committed.");
+    }
+    // The request target (path with API key) is intentionally NOT committed.
     // Assuming no sensitive request body to commit for Telegram GET requests.
 
     // Commit response parts
@@ -264,7 +266,7 @@ async fn notarize(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         match &resp_body_container.content {
             tlsn_formats::http::BodyContent::Json(json_value) => {
                 eprintln!("[prove.rs] Processing JSON response body for selective field commitment.");
-                let allowed_fields = ["forward_from", "forward_origin", "forward_date", "text"];
+                let allowed_fields = ["forward_from", "forward_sender_name", "forward_origin", "forward_date", "text"];
                 match json_value {
                     tlsn_formats::json::JsonValue::Object(root_obj) => {
                         if let Some(result_val) = root_obj.get("result") {
